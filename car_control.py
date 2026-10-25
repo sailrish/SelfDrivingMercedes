@@ -704,7 +704,9 @@ async def drive_session(client, char, selftest=False, duration=MISSION_TIME,
             try:
                 await send(client, char, motor_packet({}))  # all stop
                 await asyncio.sleep(0.2)
-                print("\nDone. Motors stopped.")
+                # Don't leave the wheels turned (the drive stays at zero).
+                await servo_to(client, char, steer_target(0.0))
+                print("\nDone. Motors stopped, wheels straight.")
             except Exception as e:
                 print(f"\nCould not send stop command: {e}")
         else:
