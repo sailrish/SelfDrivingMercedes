@@ -237,8 +237,10 @@ async def find_app_char(client):
 
 
 def on_disconnect(_client):
-    disconnect_info["reason"] = "peripheral dropped the BLE connection"
-    print("  [!] BuWizz disconnected unexpectedly")
+    # A reason is already set if we disconnected on purpose (see disconnect()).
+    if disconnect_info["reason"] is None:
+        disconnect_info["reason"] = "peripheral dropped the BLE connection"
+        print("  [!] BuWizz disconnected unexpectedly")
 
 
 async def send(client, char, packet):
@@ -643,9 +645,15 @@ async def connect():
         await feed_watchdog(client, app)          # arm watchdog (re-armed while driving)
         await asyncio.sleep(0.3)
     except BaseException:
-        await client.disconnect()
+        await disconnect(client)
         raise
     return client, app
+
+
+async def disconnect(client):
+    """Close the connection on purpose (without the 'unexpected' warning)."""
+    disconnect_info["reason"] = "disconnected on request"
+    await client.disconnect()
 
 
 async def home_steering(client, char):
@@ -722,4 +730,4 @@ async def main(recalibrate=False, selftest=False, duration=MISSION_TIME,
         await home_steering(client, app)
         await drive_session(client, app, selftest, duration, accelerate)
     finally:
-        await client.disconnect()
+        await disconnect(client)
