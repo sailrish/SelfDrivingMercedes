@@ -6,10 +6,11 @@ DriveServer.py  -  Self-Driving Mercedes: web server front end
 A small FastAPI server that drives the car over HTTP, built on the same
 car_control library as the DriveCar.py CLI.
 
-Unlike the CLI, the server connects to the BuWizz once at startup and keeps
-that connection open, so the steering center is found once (at startup) rather
-than before every run. The center is only valid for the connection it was
-measured on: if the connection drops, the next request reconnects and re-homes.
+Unlike the CLI, the server connects to the BuWizz at startup and keeps that
+connection open, so the steering center is found once per connection rather
+than before every run. The connection can be closed and reopened with
+/disconnect and /connect; while there is no connection (including after an
+unexpected drop), /run and /recenter are refused.
 
 Setup / run:
     python3 -m pip install fastapi uvicorn bleak
@@ -20,11 +21,13 @@ Endpoints:
     POST /run                       start a mission with the default duration
     POST /run  {"duration": 60}     same as `DriveCar.py --duration 60`
     POST /recenter                  re-find the steering center now
+    POST /connect                   connect to the BuWizz and home the steering
+    POST /disconnect                close the BuWizz connection
 
 /run replies 202 straight away and the mission runs in the background; its
-progress is printed to this server's console, as with the CLI. /recenter waits
-for the re-home to finish (a few seconds). Either replies 409 while the car is
-busy with the other (there is only one car).
+progress is printed to this server's console, as with the CLI. The others wait
+for their work to finish. Every endpoint replies 409 while the car is busy
+(there is only one car), and /run and /recenter reply 409 when not connected.
 
 While idle the server keeps feeding the BuWizz watchdog, which otherwise trips
 a few seconds after the last command and drops the BLE connection. Only the
@@ -48,7 +51,7 @@ from car_control import MISSION_TIME
 
 # The one BuWizz connection, and whether the steering has been homed on it.
 car = {"client": None, "char": None, "homed": False}
-# Held for anything that moves the car, so runs and recenters never overlap.
+# Held for anything that uses the car, so requests never overlap.
 car_lock = asyncio.Lock()
 # The in-flight mission, if any. Kept so it isn't garbage-collected and so a
 # request can be refused while the car is busy.
@@ -80,31 +83,39 @@ def busy():
     return car_lock.locked() or (mission_task is not None and not mission_task.done())
 
 
-async def ensure_connected():
-    """Connect to the BuWizz if we aren't already. A new connection means a new
-    encoder zero, so the old steering center no longer applies."""
-    client = car["client"]
-    if client is None or not client.is_connected:
-        car["client"], car["char"] = await car_control.connect()
-        car["homed"] = False
+def connected():
+    return car["client"] is not None and car["client"].is_connected
 
 
-async def recenter():
-    """(Re)connect if needed and find the steering center. Caller holds
-    car_lock. Raises ConnectionError if the car can't be reached."""
-    await ensure_connected()
+def check_ready():
+    """Refuse a request that needs the car if it's busy or not connected."""
+    if busy():
+        raise HTTPException(status_code=409, detail="The car is busy.")
+    if not connected():
+        raise HTTPException(status_code=409,
+                            detail="Not connected to the car; POST /connect first.")
+
+
+async def connect_and_home():
+    """Connect to the BuWizz and find the steering center. A new connection
+    may mean a new encoder zero, so it is always homed. Caller holds car_lock.
+    Raises ConnectionError if the car can't be reached."""
+    car["client"], car["char"] = await car_control.connect()
     car["homed"] = await car_control.home_steering(car["client"], car["char"])
     return car["homed"]
+
+
+async def disconnect():
+    """Close the connection if there is one. Caller holds car_lock."""
+    client = car["client"]
+    car.update(client=None, char=None, homed=False)
+    if client is not None and client.is_connected:
+        await car_control.disconnect(client)
 
 
 async def _run_mission(duration):
     async with car_lock:
         try:
-            # Normally homed at startup; only re-home if the connection was
-            # lost or the last attempt failed. Like the CLI, drive even if
-            # homing fails.
-            if not car["homed"] or not car["client"].is_connected:
-                await recenter()
             await car_control.drive_session(car["client"], car["char"],
                                             duration=duration)
         except Exception as e:
@@ -129,10 +140,10 @@ async def lifespan(_app):
     car_control.init_sensor()                      # front obstacle sensor (Pi only)
     async with car_lock:
         try:
-            if not await recenter():
-                print("Startup: steering homing failed; will retry on the next /run.")
+            if not await connect_and_home():
+                print("Startup: steering homing failed; try POST /recenter.")
         except ConnectionError as e:
-            print(f"Startup: {e} Will retry on the next request.")
+            print(f"Startup: {e} Not connected; try POST /connect.")
     keepalive_task = asyncio.create_task(keepalive())
     yield
     # Shutdown: stop any mission (drive_session stops the motors) and disconnect.
@@ -140,8 +151,7 @@ async def lifespan(_app):
     if mission_task is not None and not mission_task.done():
         mission_task.cancel()
         await asyncio.gather(mission_task, return_exceptions=True)
-    if car["client"] is not None:
-        await car_control.disconnect(car["client"])
+    await disconnect()
 
 
 app = FastAPI(title="Self-Driving Mercedes", lifespan=lifespan)
@@ -154,30 +164,62 @@ class RunRequest(BaseModel):
                     f"same as `DriveCar.py --duration`.")
 
 
+def steering():
+    return {"center": car_control.steer_cal["center"],
+            "half": car_control.steer_cal["half"]}
+
+
 @app.post("/run", status_code=202)
 async def run(req: Optional[RunRequest] = None):
     global mission_task
     req = req or RunRequest()
-    if busy():
-        raise HTTPException(status_code=409, detail="The car is busy.")
+    check_ready()
     mission_task = asyncio.create_task(_run_mission(req.duration))
     return {"status": "started", "duration": req.duration}
 
 
 @app.post("/recenter")
-async def recenter_endpoint():
-    if busy():
-        raise HTTPException(status_code=409, detail="The car is busy.")
+async def recenter():
+    check_ready()
     async with car_lock:
         try:
-            ok = await recenter()
+            car["homed"] = await car_control.home_steering(car["client"], car["char"])
         except ConnectionError as e:
             raise HTTPException(status_code=503, detail=str(e))
-    if not ok:
+    if not car["homed"]:
         raise HTTPException(status_code=500, detail="Steering homing failed.")
-    return {"status": "recentered",
-            "center": car_control.steer_cal["center"],
-            "half": car_control.steer_cal["half"]}
+    return {"status": "recentered", **steering()}
+
+
+@app.post("/connect")
+async def connect():
+    if busy():
+        raise HTTPException(status_code=409, detail="The car is busy.")
+    if connected():
+        return {"status": "already connected"}
+    async with car_lock:
+        await disconnect()                         # clear a dropped connection
+        try:
+            homed = await connect_and_home()
+        except ConnectionError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    if not homed:
+        raise HTTPException(status_code=500,
+                            detail="Connected, but steering homing failed; "
+                                   "try POST /recenter.")
+    return {"status": "connected", **steering()}
+
+
+@app.post("/disconnect")
+async def disconnect_endpoint():
+    if busy():
+        raise HTTPException(status_code=409, detail="The car is busy.")
+    if not connected():
+        return {"status": "already disconnected"}
+    async with car_lock:
+        await disconnect()
+    print("Disconnected on request.")
+    return {"status": "disconnected"}
 
 
 if __name__ == "__main__":
