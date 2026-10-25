@@ -25,10 +25,17 @@ Endpoints:
 progress is printed to this server's console, as with the CLI. /recenter waits
 for the re-home to finish (a few seconds). Either replies 409 while the car is
 busy with the other (there is only one car).
+
+While idle the server keeps feeding the BuWizz watchdog, which otherwise trips
+a few seconds after the last command and drops the BLE connection. Only the
+watchdog is fed -- no motor commands -- so the car still stops if this process
+dies. Console output is timestamped.
 """
 
 import argparse
 import asyncio
+import sys
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -46,6 +53,27 @@ car_lock = asyncio.Lock()
 # The in-flight mission, if any. Kept so it isn't garbage-collected and so a
 # request can be refused while the car is busy.
 mission_task: Optional[asyncio.Task] = None
+
+
+class Timestamped:
+    """Wraps a text stream so every line written to it starts with HH:MM:SS."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.at_line_start = True
+
+    def write(self, text):
+        out = []
+        for line in text.splitlines(keepends=True):
+            if self.at_line_start:
+                out.append(time.strftime("%H:%M:%S "))
+            out.append(line)
+            self.at_line_start = line.endswith("\n")
+        self.stream.write("".join(out))
+        return len(text)
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
 
 
 def busy():
@@ -83,6 +111,19 @@ async def _run_mission(duration):
             print(f"\nMission failed: {e!r}")
 
 
+async def keepalive():
+    """Feed the watchdog while connected so an idle connection isn't dropped.
+    Missions feed it themselves too; the extra feeds are harmless."""
+    while True:
+        await asyncio.sleep(car_control.WATCHDOG_FEED)
+        client = car["client"]
+        if client is not None and client.is_connected:
+            try:
+                await car_control.feed_watchdog(client, car["char"])
+            except Exception as e:
+                print(f"  [!] keepalive: {e!r}")
+
+
 @asynccontextmanager
 async def lifespan(_app):
     car_control.init_sensor()                      # front obstacle sensor (Pi only)
@@ -92,8 +133,10 @@ async def lifespan(_app):
                 print("Startup: steering homing failed; will retry on the next /run.")
         except ConnectionError as e:
             print(f"Startup: {e} Will retry on the next request.")
+    keepalive_task = asyncio.create_task(keepalive())
     yield
     # Shutdown: stop any mission (drive_session stops the motors) and disconnect.
+    keepalive_task.cancel()
     if mission_task is not None and not mission_task.done():
         mission_task.cancel()
         await asyncio.gather(mission_task, return_exceptions=True)
@@ -145,4 +188,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000,
                         help="Port to listen on (default 8000).")
     args = parser.parse_args()
+    sys.stdout = Timestamped(sys.stdout)
+    sys.stderr = Timestamped(sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port)
