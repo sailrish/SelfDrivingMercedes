@@ -16,10 +16,13 @@ laptop) it falls back to velocity-stall detection only.
 
 Protocol values are taken from BuWizz's official 3.0 API document.
 
-This module has no entry point of its own; it is used by DriveCar.py, the
-command-line front end, which calls main() for one complete connect / home /
-run / disconnect cycle. The steps are also exposed individually (connect(),
-home_steering(), drive_session()) for front ends that keep a connection open.
+This module has no entry point of its own; it is used by:
+    DriveCar.py     - command-line front end: calls main(), which does one
+                      complete connect / home / run / disconnect cycle
+    DriveServer.py  - FastAPI web server front end: holds one connection open
+                      and calls connect(), home_steering(), drive_session()
+                      and disconnect() separately, so the steering is homed
+                      once per connection, not per run
 
 Notes:
     - macOS: first run will prompt for Bluetooth permission for your terminal.

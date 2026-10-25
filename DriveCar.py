@@ -4,7 +4,8 @@
 DriveCar.py  -  Self-Driving Mercedes: command-line front end
 
 Parses command-line options and runs the car via car_control.main(). All the
-BLE, steering-calibration, and obstacle-avoidance logic lives in car_control.py.
+BLE, steering-calibration, and obstacle-avoidance logic lives in car_control.py
+(shared with the DriveServer.py web server).
 
 Setup / run:
     python3 -m pip install bleak                 # + adafruit-circuitpython-vl53l0x on the Pi
