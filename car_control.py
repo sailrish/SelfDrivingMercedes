@@ -80,6 +80,7 @@ STEER_TOL = 3  # consider the target reached within this many degrees
 CAL_STEP     = 20    # motor-degree increment when probing outward for a stop
 CAL_MAX      = 500   # never probe further than this many degrees from center
 CAL_LAG      = 10    # if the shaft trails the target by more than this -> at a stop
+CAL_BACKOFF  = 60    # back away this far before probing, for a run-up to the stop
 STEER_MARGIN = 0.85  # only use this fraction of full lock (don't press the stops)
 
 # The lock-to-lock travel is a fixed property of the build, so we cache the
@@ -317,7 +318,17 @@ async def probe_stop(client, char, start, direction):
     shaft stops advancing (pressed against an end stop). A real stop is detected
     when a step advances the shaft by much less than it was commanded to move --
     not merely when the shaft trails the target (which also happens in motion).
-    Returns the furthest angle actually reached."""
+    Returns the furthest angle actually reached.
+
+    It first backs CAL_BACKOFF degrees away from the stop: the last stretch
+    before a stop is stiff, and starting inside it from standstill the shaft
+    barely moves on the first step, which would be mistaken for the stop itself
+    (e.g. when a run ended with the wheels turned). The run-up carries it
+    through to the real stop."""
+    backed = await servo_to(client, char, start - direction * CAL_BACKOFF,
+                            timeout=1.5, tol=CAL_LAG)
+    if backed is not None:
+        start = backed
     reached = prev = start
     step = 0
     while step < CAL_MAX:
