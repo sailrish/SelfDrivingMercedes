@@ -32,8 +32,31 @@ Click [here](https://youtu.be/4X625ZH-nY0) to see a video.
 | File | What it is |
 |---|---|
 | `DriveCar.py` | Main program: Controlled through Bluetooth, steering calibration, obstacle avoidance |
+| `DriveServer.py` | Web server: starts the same obstacle-avoidance run over HTTP (`POST /run`, `POST /recenter`) |
+| `car_control.py` | Shared library used by `DriveCar.py` and `DriveServer.py` |
 | `sensor-test.py` | Continuously getting VL52L0X distance sensor readings |
 | `steer_cal.json` | Steering calibration |
+| `requirements.txt` | Python packages to install into the venv |
+
+### Setup
+
+On the Raspberry Pi, create the virtual environment inside the project folder:
+
+```bash
+cd ~/SelfDrivingMercedes
+sudo apt install python3-lgpio python3-rpi-lgpio python3-libgpiod   # usually preinstalled on Raspberry Pi OS
+python3 -m venv --system-site-packages venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+`--system-site-packages` is required: the sensor library talks to the Pi's GPIO
+through the Debian `python3-*gpio` packages installed by `apt`, which a plain venv
+can't see. A venv also can't be moved or renamed once created (its scripts store
+their absolute path), so if the folder moves, delete `venv/` and run these steps again.
+
+On a laptop the same steps work without the `apt` line; the sensor library is
+skipped and the car uses stall detection only.
 
 ### Running it
 

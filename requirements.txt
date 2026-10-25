@@ -1,0 +1,5 @@
+bleak==3.0.2
+fastapi==0.162.0
+uvicorn==0.54.0
+# Front distance sensor -- Raspberry Pi only (pulls in adafruit-blinka for `board`)
+adafruit-circuitpython-vl53l0x==3.6.19 ; platform_machine == "aarch64"
